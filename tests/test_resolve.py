@@ -28,3 +28,38 @@ def test_npx_fallback_when_not_on_path(monkeypatch):
 
 def test_unknown_peer_returns_none():
     assert resolve.resolve("nope") is None
+
+
+# --- resolve_version_bin: probe binary may differ from the run package ---
+
+
+def test_version_bin_brain_resolves_server_via_path(monkeypatch):
+    monkeypatch.delenv("WICKED_BRAIN_BIN", raising=False)
+    with patch.object(shutil, "which", return_value="/usr/local/bin/wicked-brain-server"):
+        assert resolve.resolve_version_bin("brain") == ["/usr/local/bin/wicked-brain-server"]
+
+
+def test_version_bin_brain_npx_fallback_uses_server(monkeypatch):
+    monkeypatch.delenv("WICKED_BRAIN_BIN", raising=False)
+    with patch.object(shutil, "which", return_value=None):
+        assert resolve.resolve_version_bin("brain") == ["npx", "wicked-brain-server"]
+
+
+def test_version_bin_same_binary_peer_uses_npm_package(monkeypatch):
+    monkeypatch.delenv("WICKED_VAULT_BIN", raising=False)
+    with patch.object(shutil, "which", return_value=None):
+        assert resolve.resolve_version_bin("vault") == ["npx", "wicked-vault"]
+
+
+def test_version_bin_honors_killswitch(monkeypatch):
+    monkeypatch.setenv("WICKED_BRAIN_BIN", "")
+    assert resolve.resolve_version_bin("brain") is None
+
+
+def test_version_bin_honors_env_override(monkeypatch):
+    monkeypatch.setenv("WICKED_BRAIN_BIN", "/opt/custom/brain")
+    assert resolve.resolve_version_bin("brain") == ["/opt/custom/brain"]
+
+
+def test_version_bin_unknown_peer_returns_none():
+    assert resolve.resolve_version_bin("nope") is None

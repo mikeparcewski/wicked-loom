@@ -18,7 +18,7 @@ from typing import Callable
 
 from loom import manifest
 from loom.manifest import Peer
-from loom.resolve import resolve
+from loom.resolve import resolve_version_bin
 
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 
@@ -56,13 +56,19 @@ def _meets_pin(installed: str, pin: str) -> bool:
     return (ip[0], ip[1]) >= (pp[0], pp[1])  # MAJOR.MINOR floor
 
 
-def _probe_command(cmd: list[str], peer: Peer) -> list[str]:
-    """The version-probe argv: the resolved runnable + the probe's trailing args.
+def _probe_command(version_cmd: list[str], peer: Peer) -> list[str]:
+    """The version-probe argv: the resolved version binary + the probe's
+    trailing args.
 
-    e.g. cmd=["npx","wicked-vault"] + probe ["wicked-vault","--version"]
-         -> ["npx","wicked-vault","--version"].
+    The version binary can differ from the runnable package — brain runs as
+    ``wicked-brain`` but reports its version via ``wicked-brain-server`` — so
+    we resolve ``peer.version_package`` (not npm_package) here.
+
+    e.g. version_cmd=["npx","wicked-brain-server"] + probe
+         ["wicked-brain-server","--version"]
+         -> ["npx","wicked-brain-server","--version"].
     """
-    return cmd + peer.probe_cmd[1:]
+    return version_cmd + peer.probe_cmd[1:]
 
 
 def check_peer(name: str, run: Runner = _default_run) -> dict:
@@ -70,12 +76,12 @@ def check_peer(name: str, run: Runner = _default_run) -> dict:
     if peer is None:
         return {"peer": name, "status": "error", "detail": "unknown peer"}
 
-    cmd = resolve(name)
-    if cmd is None:
+    version_cmd = resolve_version_bin(name)
+    if version_cmd is None:
         return {"peer": name, "status": "missing", "pin": peer.version_pin}
 
     try:
-        result = run(_probe_command(cmd, peer))
+        result = run(_probe_command(version_cmd, peer))
     except Exception as e:  # noqa: BLE001 — surface as data, never crash (R4)
         return {"peer": name, "status": "error", "detail": str(e), "pin": peer.version_pin}
 

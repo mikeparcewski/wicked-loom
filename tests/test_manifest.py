@@ -22,3 +22,19 @@ def test_vault_pins_match_garden():
 
 def test_get_unknown_peer_returns_none():
     assert manifest.get("nope") is None
+
+
+def test_version_package_defaults_to_npm_package():
+    for name in ("vault", "testing", "bus"):
+        peer = manifest.PEERS[name]
+        assert peer.version_bin == ""  # no override
+        assert peer.version_package == peer.npm_package
+
+
+def test_brain_version_package_is_brain_server():
+    brain = manifest.PEERS["brain"]
+    assert brain.npm_package == "wicked-brain"
+    assert brain.version_bin == "wicked-brain-server"
+    assert brain.version_package == "wicked-brain-server"
+    # probe_cmd[0] and version_package agree — the probe targets the same binary
+    assert brain.probe_cmd[0] == brain.version_package

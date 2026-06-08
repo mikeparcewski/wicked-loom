@@ -19,6 +19,15 @@ class Peer:
     version_pin: str        # MAJOR.MINOR floor, e.g. "0.3"
     install_cmd: list[str]  # headless install command
     probe_cmd: list[str]    # command to print the installed version
+    # The probe binary can legitimately differ from the install/run package:
+    # e.g. brain installs/runs as `wicked-brain` but reports its version via
+    # `wicked-brain-server`. Empty string means "same as npm_package".
+    version_bin: str = ""
+
+    @property
+    def version_package(self) -> str:
+        """The binary that answers ``probe_cmd`` — falls back to npm_package."""
+        return self.version_bin or self.npm_package
 
 
 PEERS: dict[str, Peer] = {
@@ -45,6 +54,8 @@ PEERS: dict[str, Peer] = {
         version_pin="0.14",
         install_cmd=["npm", "install", "-g", "wicked-brain@latest"],
         probe_cmd=["wicked-brain-server", "--version"],
+        # Version lives in the server binary, not the `wicked-brain` package.
+        version_bin="wicked-brain-server",
     ),
     "bus": Peer(
         name="bus",
