@@ -1,0 +1,12 @@
+{
+  "name": "wicked-loom",
+  "version": "0.1.0",
+  "description": "Local-first orchestration runtime for agent ecosystems: resolves, version-checks, and installs the wicked-* peer set (compose). Conduct (gate/flow) ships separately.",
+  "bin": { "loom": "bin/loom.mjs" },
+  "files": ["bin/", "python/", "README.md"],
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "license": "MIT",
+  "repository": "https://github.com/mikeparcewski/wicked-loom",
+  "keywords": ["orchestration", "agents", "local-first", "compose", "wicked"]
+}
