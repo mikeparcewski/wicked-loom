@@ -21,7 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Python 3 stdlib only — no dependencies to install.
+      # The package is stdlib-only; pytest is the sole *dev* dependency (the
+      # test suite uses its fixtures). Install it before running the suite.
+      - name: Install test deps
+        run: python -m pip install --upgrade pip pytest
       - name: Run the test suite
         run: PYTHONPATH=python python -m pytest -q
 
