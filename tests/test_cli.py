@@ -53,3 +53,93 @@ def test_compose_install_targets_one_peer():
 def test_unknown_command_exits_two():
     code, _ = _run(["frobnicate"])
     assert code == 2
+
+
+# --- conduct: gate + flow ---------------------------------------------------
+
+import json as _json  # noqa: E402
+
+
+def test_gate_command_satisfied_exits_zero():
+    verdict = {"satisfied": True, "overall": "PASS", "gate": "vault-cross-check"}
+    with patch("loom.cli.run_gate", return_value=verdict) as m:
+        code, out = _run(["gate", "test-report", "--scope", "build-1"])
+    assert code == 0
+    assert _json.loads(out)["gate"]["satisfied"] is True
+    m.assert_called_once()
+
+
+def test_gate_command_unsatisfied_exits_one():
+    verdict = {"satisfied": False, "overall": "REJECT", "gate": "vault-cross-check"}
+    with patch("loom.cli.run_gate", return_value=verdict):
+        code, _ = _run(["gate", "test-report", "--scope", "build-1"])
+    assert code == 1
+
+
+def test_gate_command_forwards_flags():
+    with patch("loom.cli.run_gate", return_value={"satisfied": True}) as m:
+        _run(["gate", "verdict", "--scope", "b1",
+              "--verifier-spec", "/tmp/v.json", "--with-attestations"])
+    _, kwargs = m.call_args
+    assert kwargs["scope"] == "b1"
+    assert kwargs["verifier_spec"] == "/tmp/v.json"
+    assert kwargs["with_attestations"] is True
+
+
+def test_gate_requires_produces_arg():
+    code, _ = _run(["gate"])
+    assert code == 2
+
+
+def test_flow_run_completed_exits_zero(tmp_path):
+    fd = {"flow_id": "cli-1",
+          "phases": [{"name": "a", "gate": None, "hitl": "none"}],
+          "peers_required": [], "verifier_spec_ref": None}
+    p = tmp_path / "flow.json"
+    p.write_text(_json.dumps(fd), encoding="utf-8")
+    completed = {"flow_id": "cli-1", "status": "completed"}
+    with patch("loom.cli.run_flow", return_value=completed) as m:
+        code, out = _run(["flow", "run", str(p), "--state-dir", str(tmp_path)])
+    assert code == 0
+    assert _json.loads(out)["flow"]["status"] == "completed"
+    m.assert_called_once()
+
+
+def test_flow_run_parked_exits_two(tmp_path):
+    fd = {"flow_id": "cli-2", "phases": [], "peers_required": [],
+          "verifier_spec_ref": None}
+    p = tmp_path / "flow.json"
+    p.write_text(_json.dumps(fd), encoding="utf-8")
+    with patch("loom.cli.run_flow", return_value={"status": "parked"}):
+        code, _ = _run(["flow", "run", str(p), "--state-dir", str(tmp_path)])
+    assert code == 2
+
+
+def test_flow_status_found_exits_zero(tmp_path):
+    with patch("loom.cli.flow_status", return_value={"flow_id": "x", "status": "running"}):
+        code, out = _run(["flow", "status", "x", "--state-dir", str(tmp_path)])
+    assert code == 0
+    assert _json.loads(out)["flow"]["flow_id"] == "x"
+
+
+def test_flow_status_missing_exits_one(tmp_path):
+    with patch("loom.cli.flow_status", return_value=None):
+        code, _ = _run(["flow", "status", "nope", "--state-dir", str(tmp_path)])
+    assert code == 1
+
+
+def test_flow_resume_completed_exits_zero(tmp_path):
+    with patch("loom.cli.flow_resume", return_value={"status": "completed"}):
+        code, _ = _run(["flow", "resume", "x", "--state-dir", str(tmp_path)])
+    assert code == 0
+
+
+def test_flow_resume_missing_exits_one(tmp_path):
+    with patch("loom.cli.flow_resume", return_value=None):
+        code, _ = _run(["flow", "resume", "nope", "--state-dir", str(tmp_path)])
+    assert code == 1
+
+
+def test_flow_unknown_subcommand_exits_two():
+    code, _ = _run(["flow", "frobnicate"])
+    assert code == 2
