@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # wicked-loom is a hybrid: a Python 3 stdlib core (the compose surface) shipped
+  # inside an npm package via a Node bin shim. The real test suite is pytest; the
+  # Node side only needs a pack sanity check.
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Python 3 stdlib only — no dependencies to install.
+      - name: Run the test suite
+        run: PYTHONPATH=python python -m pytest -q
+
+  # Prove the shipped npm package packs cleanly (correct files allowlist, no
+  # test/pycache leakage). Pure ESM bin shim — no native deps.
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: npm pack sanity
+        run: npm pack --dry-run

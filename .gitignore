@@ -1,4 +1,16 @@
+# macOS
+.DS_Store
+
+# Python
 __pycache__/
-*.pyc
-node_modules/
+*.py[cod]
+.venv/
+venv/
 .pytest_cache/
+
+# Node
+node_modules/
+
+# Editors
+.idea/
+.vscode/
