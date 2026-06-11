@@ -1,3 +1,12 @@
+# wicked-loom — Release caller.
+# Hybrid package: Python core shipped via an npm bin shim. The pre-publish gate
+# is pytest (so setup_python: true), but the publish itself is npm. Zero npm
+# deps, so no pre_publish_install_dirs.
+#
+# loom's CI (ci.yml) stays BESPOKE — its matrix is over Python versions
+# (3.9–3.12) plus an `npm pack` sanity job, which is genuinely repo-specific
+# (the same way wicked-brain's `wiki` job stays in the caller). Only the
+# release converges on the shared workflow.
 name: Release
 
 on:
@@ -8,113 +17,17 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write   # npm provenance via OIDC trusted publisher
+  id-token: write
+  pull-requests: write
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install test deps
-        run: python -m pip install --upgrade pip pytest
-      - name: Run the test suite
-        run: PYTHONPATH=python python -m pytest -q
-
-  publish-npm:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: lts/*
-          registry-url: https://registry.npmjs.org
-
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-
-      # wicked-loom is zero-dependency (the npm package ships only the bin shim
-      # + bundled Python sources), so there is nothing to install before
-      # publishing. Trusted publisher (id-token) + provenance — no NPM token.
-      - name: Publish to npm (trusted publisher + provenance)
-        run: npm publish --access public --provenance
-
-  publish-github-packages:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: lts/*
-          registry-url: https://npm.pkg.github.com
-          scope: '@mikeparcewski'
-
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-
-      - name: Publish to GitHub Packages
-        run: |
-          npm pkg set name='@mikeparcewski/wicked-loom'
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  github-release:
-    needs: publish-npm
-    if: always() && needs.publish-npm.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # After a successful publish, open a PR that brings package.json on main in
-  # step with the released version — so we can tag without a manual bump. The
-  # catchup PR is squash-merged with one click. peter-evans/create-pull-request
-  # is idempotent: re-running on the same version updates the branch.
-  sync-package-json:
-    needs: publish-npm
-    if: needs.publish-npm.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: actions/setup-node@v6
-        with:
-          node-version: lts/*
-      - name: Bump package.json to released version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-      - name: Open catchup PR
-        uses: peter-evans/create-pull-request@v8
-        with:
-          title: "chore(release): sync package.json to ${{ github.ref_name }}"
-          commit-message: "chore(release): sync package.json to ${{ github.ref_name }}"
-          branch: release-sync/${{ github.ref_name }}
-          base: main
-          labels: release-sync
-          body: |
-            Automated catchup — `${{ github.ref_name }}` has been published to npm.
-            This PR brings `package.json` on `main` in step with the released
-            version. Safe to squash-merge.
-          delete-branch: true
+  release:
+    uses: mikeparcewski/wicked-ci/.github/workflows/node-release.yml@0382b46d00d772c09911f9d00021e0172eb9abe4 # v1.1.0
+    with:
+      package_name: wicked-loom
+      os_matrix: '["ubuntu-latest"]'
+      setup_python: true
+      install_cmd: 'python -m pip install --upgrade pip pytest'
+      test_cmd: 'PYTHONPATH=python python -m pytest -q'
+      enable_sync_pr: true
+    secrets: inherit
