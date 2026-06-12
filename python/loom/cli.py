@@ -74,13 +74,39 @@ def _opt(args: list, name: str) -> "str | None":
     return None
 
 
+# Options that take a value (the next token is consumed by the option, not a
+# positional). Used to extract positionals by POSITION, not by value — so a
+# positional that happens to equal an option's value is not stolen.
+_VALUE_OPTS = ("--scope", "--verifier-spec", "--state-dir")
+
+
+def _positionals(args: list) -> list:
+    """Return the positional tokens, skipping flags and the value tokens that
+    belong to value-taking options. Position-aware so e.g.
+    ``gate X --scope X`` keeps the first ``X`` as the produces positional."""
+    out: list = []
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok in _VALUE_OPTS:
+            i += 2  # skip the option and its value token
+            continue
+        if tok.startswith("--"):
+            i += 1  # a bare flag (e.g. --with-attestations)
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
 def _cmd_gate(args: list) -> int:
-    positional = [a for a in args if not a.startswith("--")]
-    # Strip values that belong to --scope / --verifier-spec from positionals.
     scope = _opt(args, "--scope") or "default"
     verifier_spec = _opt(args, "--verifier-spec")
-    consumed = {scope, verifier_spec}
-    produces = next((a for a in positional if a not in consumed), None)
+    # Extract the produces positional by POSITION, not value-equality, so that
+    # ``gate <x> --scope <x>`` (produces == scope) is accepted (parser bug fix).
+    positional = _positionals(args)
+    produces = positional[0] if positional else None
     if produces is None:
         _emit({"error": "usage: loom gate <produces> [--scope S] "
                         "[--verifier-spec PATH] [--with-attestations]"})
@@ -91,40 +117,65 @@ def _cmd_gate(args: list) -> int:
     return 0 if verdict.get("satisfied") else 1
 
 
+def _load_flow_def(path_str: str) -> dict:
+    """Read + parse a flow-def JSON file. Raises on missing file / bad JSON;
+    the caller (``_cmd_flow``) turns those into structured JSON errors so the
+    'never raise — surface as data' invariant holds at the CLI boundary."""
+    return json.loads(Path(path_str).read_text(encoding="utf-8"))
+
+
 def _cmd_flow(args: list) -> int:
     if not args:
         _emit({"error": "usage: loom flow <run|status|resume> ..."})
         return 2
     sub, rest = args[0], args[1:]
     state_dir = Path(_opt(rest, "--state-dir") or _default_state_dir())
-    positional = [a for a in rest if not a.startswith("--") and a != str(state_dir)]
+    # Position-aware: never confuse a positional with a --state-dir value.
+    positional = _positionals(rest)
 
-    if sub == "run":
-        if not positional:
-            _emit({"error": "usage: loom flow run <flow-def.json> [--state-dir D]"})
-            return 2
-        flow_def = json.loads(Path(positional[0]).read_text(encoding="utf-8"))
-        st = run_flow(flow_def, state_dir=state_dir)
-        _emit({"flow": st})
-        return 0 if st.get("status") == "completed" else 2
+    # Every path that can raise (missing file, bad JSON, unsafe flow_id) is
+    # wrapped here so the CLI boundary surfaces errors as JSON, never a raw
+    # traceback (R4 — "never raise, surface as data").
+    try:
+        if sub == "run":
+            if not positional:
+                _emit({"error": "usage: loom flow run <flow-def.json> [--state-dir D]"})
+                return 2
+            flow_def = _load_flow_def(positional[0])
+            st = run_flow(flow_def, state_dir=state_dir)
+            _emit({"flow": st})
+            return 0 if st.get("status") == "completed" else 2
 
-    if sub == "status":
-        if not positional:
-            _emit({"error": "usage: loom flow status <flow-id> [--state-dir D]"})
-            return 2
-        st = flow_status(positional[0], state_dir=state_dir)
-        _emit({"flow": st})
-        return 0 if st is not None else 1
+        if sub == "status":
+            if not positional:
+                _emit({"error": "usage: loom flow status <flow-id> [--state-dir D]"})
+                return 2
+            st = flow_status(positional[0], state_dir=state_dir)
+            _emit({"flow": st})
+            return 0 if st is not None else 1
 
-    if sub == "resume":
-        if not positional:
-            _emit({"error": "usage: loom flow resume <flow-id> [--state-dir D]"})
-            return 2
-        st = flow_resume(positional[0], state_dir=state_dir)
-        _emit({"flow": st})
-        if st is None:
-            return 1
-        return 0 if st.get("status") == "completed" else 2
+        if sub == "resume":
+            if not positional:
+                _emit({"error": "usage: loom flow resume <flow-id> [--state-dir D]"})
+                return 2
+            st = flow_resume(positional[0], state_dir=state_dir)
+            _emit({"flow": st})
+            if st is None:
+                return 1
+            return 0 if st.get("status") == "completed" else 2
+    except FileNotFoundError as e:
+        _emit({"error": "flow-def file not found", "detail": str(e)})
+        return 2
+    except json.JSONDecodeError as e:
+        _emit({"error": "flow-def is not valid JSON", "detail": str(e)})
+        return 2
+    except ValueError as e:
+        # e.g. unsafe / path-traversal flow_id rejected by flowstate guard.
+        _emit({"error": "invalid flow argument", "detail": str(e)})
+        return 2
+    except OSError as e:  # noqa: BLE001 — any other fs error surfaces as data.
+        _emit({"error": "flow I/O error", "detail": str(e)})
+        return 2
 
     _emit({"error": f"unknown flow subcommand: {sub}",
            "subcommands": ["run", "status", "resume"]})
@@ -149,4 +200,15 @@ def main(argv: "list[str] | None" = None) -> int:
     if handler is None:
         _emit({"error": f"unknown command: {argv[0]}", "commands": list(_DISPATCH)})
         return 2
-    return handler(argv[1:])
+    # Top-level safety net: the CLI boundary NEVER lets a raw traceback escape.
+    # Any unhandled exception is surfaced as a structured JSON error with a
+    # non-zero exit (R4 — "never raise, surface as data"). Fail-closed behavior
+    # is preserved inside the handlers; this only guards the boundary itself.
+    try:
+        return handler(argv[1:])
+    except Exception as e:  # noqa: BLE001 — surface as data, never traceback.
+        _emit({"error": f"{type(e).__name__}: {e}",
+               "command": argv[0],
+               "detail": "loom never raises at the CLI boundary; "
+                         "this error is surfaced as data (R4)."})
+        return 2
