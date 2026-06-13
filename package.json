@@ -1,6 +1,6 @@
 {
   "name": "wicked-loom",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Local-first orchestration runtime for agent ecosystems: resolves, version-checks, and installs the wicked-* peer set (compose). Conduct (gate/flow) ships separately.",
   "bin": {
     "wicked-loom": "bin/loom.mjs",
