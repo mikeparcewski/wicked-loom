@@ -40,10 +40,27 @@ def test_check_peer_unresolvable_is_missing():
     assert r["status"] == "missing"
 
 
-def test_check_peer_probe_failure_is_error():
+def test_check_peer_nonzero_exit_but_resolved_is_present_not_error():
+    """A resolved binary that exits non-zero (e.g. an older CLI that prints
+    help/usage for an unrecognized --version) is PRESENT and responding — not a
+    hard error. Cry-wolf finding: this used to be reported as "error"."""
     with patch.object(compose, "resolve_version_bin", return_value=["wicked-vault"]):
         r = compose.check_peer("vault", run=_runner(code=1))
+    assert r["status"] == "present"
+    assert r["ok"] is True
+    assert r["status"] != "error"
+
+
+def test_check_peer_probe_raise_is_error():
+    """The ONLY path to "error" after resolution succeeds: the probe attempt
+    itself RAISES (binary vanished mid-call / OS error). Genuine fault."""
+    def boom(cmd, timeout=None):
+        raise OSError("No such file or directory")
+
+    with patch.object(compose, "resolve_version_bin", return_value=["wicked-vault"]):
+        r = compose.check_peer("vault", run=boom)
     assert r["status"] == "error"
+    assert r["ok"] is False
 
 
 def test_install_peer_runs_install_cmd_and_reports():
@@ -95,15 +112,18 @@ def test_brain_probe_below_pin_is_drift():
     assert r["installed"] == "0.13.9"
 
 
-def test_brain_probe_unparseable_version_is_error():
-    """The original bug surfaced as 'unparseable version' when the wrong binary
-    was probed; guard that a genuinely unparseable probe still classifies error."""
+def test_brain_probe_unparseable_version_is_present_not_error():
+    """A probe that RAN but produced no parseable version means the peer is
+    present and responding — version merely unknown. This must surface as the
+    WARN-level "present" status (ok=True), NOT a hard "error" (cry-wolf finding:
+    a responding peer was being reported as error)."""
     run, _calls = _capturing_runner(stdout="not a version\n")
     with patch.object(compose, "resolve_version_bin",
                       return_value=["npx", "wicked-brain-server"]):
         r = compose.check_peer("brain", run=run)
-    assert r["status"] == "error"
-    assert r["detail"] == "unparseable version"
+    assert r["status"] == "present"
+    assert r["ok"] is True
+    assert r["status"] != "error"
 
 
 def test_same_binary_peers_probe_their_npm_package():
@@ -117,3 +137,70 @@ def test_same_binary_peers_probe_their_npm_package():
             r = compose.check_peer(name, run=run)
         assert calls == [[peer.npm_package, "--version"]]
         assert r["status"] == "ok"
+
+
+# --- cry-wolf finding: a HEALTHY bus must never be reported status=error ------
+#
+# Root cause: ``wicked-bus --version`` on an older/help-printing CLI emits the
+# usage JSON to stdout and exits NON-ZERO. The probe got a clean RunResult (the
+# bus is installed and responding), yet loom declared a hard "error". A healthy
+# peer must never be reported as an error. The fix distinguishes "present but
+# version unknown" (ok, warn-level) from "genuinely absent" (missing / raised).
+
+
+# Verbatim shape of what a real, healthy `wicked-bus --version` prints today:
+# usage JSON to stdout, exit code 1 (no clean version string anywhere).
+_BUS_HELP_JSON = (
+    '{\n'
+    '  "usage": "wicked-bus <command> [options]",\n'
+    '  "commands": ["init", "emit", "subscribe", "status"],\n'
+    '  "global_flags": ["--db-path <path>", "--json", "--log-level <level>"]\n'
+    '}\n'
+)
+
+
+def test_healthy_bus_with_help_style_version_output_is_not_error():
+    """Drive the REAL probe with a fake bus that returns help-style JSON and a
+    non-zero exit (the exact reproduction of the cry-wolf finding). A healthy,
+    responding bus must NOT yield status "error"."""
+    run, calls = _capturing_runner(stdout=_BUS_HELP_JSON, code=1)
+    with patch.object(compose, "resolve_version_bin", return_value=["wicked-bus"]):
+        r = compose.check_peer("bus", run=run)
+    # The real probe binary/args were exercised — not stubbed away.
+    assert calls == [["wicked-bus", "--version"]]
+    # The healthy bus is NOT a hard error.
+    assert r["status"] != "error"
+    assert r["status"] == "present"
+    assert r["ok"] is True
+
+
+def test_healthy_bus_with_clean_version_output_is_ok():
+    """The sibling fix gives wicked-bus a clean ``--version``. When that lands,
+    loom parses it and reports ok — no regression for the modern bus."""
+    run, calls = _capturing_runner(stdout="wicked-bus 2.1.0\n", code=0)
+    with patch.object(compose, "resolve_version_bin", return_value=["wicked-bus"]):
+        r = compose.check_peer("bus", run=run)
+    assert calls == [["wicked-bus", "--version"]]
+    assert r["status"] == "ok"
+    assert r["ok"] is True
+    assert r["installed"] == "2.1.0"
+
+
+def test_neither_healthy_bus_case_reports_error():
+    """Belt-and-suspenders over both healthy shapes (help-style + clean): the
+    one thing that must hold is that a responding bus is never status=error."""
+    for stdout, code in ((_BUS_HELP_JSON, 1), ("wicked-bus 2.0.0", 0)):
+        run, _calls = _capturing_runner(stdout=stdout, code=code)
+        with patch.object(compose, "resolve_version_bin", return_value=["wicked-bus"]):
+            r = compose.check_peer("bus", run=run)
+        assert r["status"] != "error"
+        assert r["ok"] is True
+
+
+def test_genuinely_absent_bus_is_missing_not_ok():
+    """Fail-closed for a genuinely absent bus is preserved: unresolvable ->
+    "missing", ok=False (NOT silently treated as healthy)."""
+    with patch.object(compose, "resolve_version_bin", return_value=None):
+        r = compose.check_peer("bus", run=_runner())
+    assert r["status"] == "missing"
+    assert r["ok"] is False

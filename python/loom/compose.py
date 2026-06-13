@@ -6,7 +6,23 @@ check_all:   one check_peer row per known peer.
 
 Subprocess execution is injected (the ``run`` parameter) so callers (and tests)
 control side effects. Nothing here raises — failures are returned as status
-rows ("ok" | "drift" | "missing" | "error" | "installed" | "install-failed").
+rows ("ok" | "drift" | "present" | "missing" | "error" | "installed"
+| "install-failed").
+
+Status semantics (no cry-wolf — see R4 "never raise, surface as data"):
+  ok       — resolved, probe ran, version parsed, version >= pin.
+  drift    — resolved, probe ran, version parsed, version <  pin.
+  present  — resolved AND the probe binary RAN (we got a RunResult, not an
+             exception), but its version could not be determined: a non-zero
+             exit (older CLIs print help/usage when given ``--version``) or
+             unparseable output. The peer is healthy/responding; we just can't
+             read its version. This is WARN-level, NOT an error — reporting a
+             responding peer as "error" was a false alarm (cry-wolf). The
+             ``ok`` flag on the row is True so health probes don't fail hard.
+  missing  — unresolvable: no binary on PATH / npx / env override (kill-switch).
+  error    — reserved for genuine faults: unknown peer, or the probe attempt
+             RAISED (binary vanished, OS error). A responding-but-unparseable
+             peer is NEVER "error".
 """
 
 from __future__ import annotations
@@ -74,28 +90,45 @@ def _probe_command(version_cmd: list[str], peer: Peer) -> list[str]:
 def check_peer(name: str, run: Runner = _default_run) -> dict:
     peer = manifest.get(name)
     if peer is None:
-        return {"peer": name, "status": "error", "detail": "unknown peer"}
+        return {"peer": name, "status": "error", "ok": False, "detail": "unknown peer"}
 
     version_cmd = resolve_version_bin(name)
     if version_cmd is None:
-        return {"peer": name, "status": "missing", "pin": peer.version_pin}
+        # Genuinely unresolvable — no binary anywhere. Legitimately not-ok.
+        return {"peer": name, "status": "missing", "ok": False, "pin": peer.version_pin}
 
     try:
         result = run(_probe_command(version_cmd, peer))
     except Exception as e:  # noqa: BLE001 — surface as data, never crash (R4)
-        return {"peer": name, "status": "error", "detail": str(e), "pin": peer.version_pin}
+        # The probe itself RAISED (binary vanished mid-call, OS error). This is
+        # the only path that means "absent/unrunnable" once resolution succeeded
+        # — a genuine error, not cry-wolf.
+        return {"peer": name, "status": "error", "ok": False,
+                "detail": str(e), "pin": peer.version_pin}
 
-    if result.returncode != 0:
-        return {"peer": name, "status": "error", "detail": result.stderr.strip(),
-                "pin": peer.version_pin}
+    # From here the binary resolved AND produced a RunResult: the peer is
+    # PRESENT and RESPONDING. Prefer stdout for the version, but tolerate older
+    # CLIs that print it to stderr.
+    installed = _parse_version(result.stdout) or _parse_version(result.stderr)
 
-    installed = _parse_version(result.stdout)
-    if installed is None:
-        return {"peer": name, "status": "error", "detail": "unparseable version",
-                "pin": peer.version_pin}
+    if installed is not None:
+        status = "ok" if _meets_pin(installed, peer.version_pin) else "drift"
+        return {"peer": name, "status": status, "ok": status == "ok",
+                "installed": installed, "pin": peer.version_pin}
 
-    status = "ok" if _meets_pin(installed, peer.version_pin) else "drift"
-    return {"peer": name, "status": status, "installed": installed, "pin": peer.version_pin}
+    # Present + responding, but version unknown: a non-zero exit (older buses
+    # print help/usage JSON for an unrecognized ``--version``) OR parseable-free
+    # output. The peer is healthy — do NOT raise a hard "error" (the cry-wolf
+    # finding). Surface it as WARN-level "present" with ok=True so doctor/health
+    # probes don't treat a responding peer as a failure.
+    detail = (
+        "probe exited %d; version not reported (older CLI may print help "
+        "for --version)" % result.returncode
+        if result.returncode != 0
+        else "version not reported by probe output"
+    )
+    return {"peer": name, "status": "present", "ok": True,
+            "detail": detail, "pin": peer.version_pin}
 
 
 def install_peer(name: str, run: Runner = _default_run) -> dict:
