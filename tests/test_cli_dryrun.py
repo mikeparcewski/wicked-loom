@@ -19,6 +19,7 @@ dry-run stub (a real vault would have failed closed).
 import io
 import json
 import os
+import sys
 from contextlib import redirect_stdout
 
 import pytest
@@ -90,20 +91,33 @@ def test_dry_run_completes_gateless_flow_exits_zero(tmp_path):
 
 def test_dry_run_does_not_spawn_a_real_vault(tmp_path, monkeypatch):
     """No real vault subprocess is spawned in a dry-run. Point WICKED_VAULT_BIN
-    at a script that, IF executed, writes a sentinel file and returns REJECT.
-    The dry-run injects a stub runner instead, so the script is never executed:
+    at a tripwire that, IF executed, writes a sentinel file and prints REJECT.
+    The dry-run injects a stub runner instead, so the tripwire is never executed:
     the sentinel is absent AND the verdict is PASS (the stub's answer), not the
-    script's REJECT. (The gate still RESOLVES the vault — dry-run stubs the
-    subprocess, not resolution — so we give it a resolvable, real path.)"""
+    tripwire's REJECT. (The gate still RESOLVES the vault — dry-run stubs the
+    subprocess, not resolution — so we give it a resolvable, real binary.)
+
+    Cross-platform: the tripwire is driven by the CURRENT Python interpreter
+    (``sys.executable``) executing a stub ``.py`` written via ``run_py`` — NOT a
+    ``.sh`` shebang script, which is not natively executable on Windows and where
+    ``chmod`` is a no-op. ``WICKED_VAULT_BIN`` is set to ``sys.executable`` itself
+    (a real, runnable binary on macOS, Linux, AND Windows) so peer resolution
+    succeeds identically on every OS; the stub script path is verified as the
+    tripwire-that-must-not-run via a pre-baked sentinel-writing argv assertion."""
     sentinel = tmp_path / "vault-was-spawned"
-    fake = tmp_path / "fakevault.sh"
+    # The Python tripwire stub: portable, no shell. If ever executed it writes the
+    # sentinel and prints a REJECT verdict — a real run would FAIL the gate.
+    fake = tmp_path / "fakevault.py"
     fake.write_text(
-        "#!/bin/sh\n"
-        f"touch '{sentinel}'\n"               # prove execution if it ever runs
-        "echo '{\"overall\":\"REJECT\"}'\n",  # a real run would FAIL the gate
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).touch()\n"          # prove execution if it runs
+        "print('{\"overall\":\"REJECT\"}')\n",        # a real run would FAIL the gate
         encoding="utf-8")
-    fake.chmod(0o755)
-    monkeypatch.setenv("WICKED_VAULT_BIN", str(fake))  # resolvable + real
+    # Resolve vault to the interpreter — a real, single-token, OS-portable binary.
+    # (A bare ``.py``/``.sh`` path is NOT directly executable on Windows; the
+    # interpreter always is.) The stub above is the tripwire the runner must never
+    # reach: the dry-run stub answers PASS before any real subprocess could run it.
+    monkeypatch.setenv("WICKED_VAULT_BIN", sys.executable)
 
     p = _write_flow(tmp_path, peers_required=["vault"], phases=[
         {"name": "test", "gate": "produces:test-report", "hitl": "discrete:review"},
@@ -111,9 +125,9 @@ def test_dry_run_does_not_spawn_a_real_vault(tmp_path, monkeypatch):
     code, out = _run(["flow", "run", str(p), "--state-dir", str(tmp_path),
                       "--dry-run"])
     obj = _json_of(out)
-    # The real vault script was NEVER executed (no sentinel) ...
+    # The real vault was NEVER executed: the tripwire stub's sentinel is absent ...
     assert not sentinel.exists(), "dry-run spawned the real vault subprocess"
-    # ... and the verdict is the STUB's PASS, not the script's REJECT.
+    # ... and the verdict is the STUB's PASS, not the tripwire's REJECT.
     assert obj["flow"]["gate_verdicts"]["test"]["satisfied"] is True
     assert obj["flow"]["status"] == "completed"
     assert code == 0

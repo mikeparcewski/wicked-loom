@@ -261,3 +261,96 @@ def test_empty_peers_required_never_gaps(tmp_path):
                                vault_run=_vault("PASS"), bus_run=_silent_bus())
     assert st["status"] == "completed"
     assert st["gate_verdicts"]["test"]["gate"] == "vault-cross-check"
+
+
+# --- peers_required shape guard: null / missing / malformed must NOT crash or
+#     misbehave. Treat null/missing as "no required peers"; never iterate a
+#     non-list (a bare string would otherwise be walked char-by-char). ---------
+
+
+def test_null_peers_required_treated_as_none_and_completes(tmp_path):
+    """A flow def with an explicit ``"peers_required": null`` must NOT crash
+    (``list(None)`` would). It is treated as "no required peers": construction
+    succeeds and the gate re-derives normally to completion."""
+    fd = _gated_flow("null-peers", None)  # peers_required is literally None
+    with patch.object(flow, "resolve", return_value=["wicked-vault"]):
+        from loom import gate
+        with patch.object(gate, "resolve", return_value=["wicked-vault"]):
+            st = flow.run_flow(fd, state_dir=tmp_path,
+                               vault_run=_vault("PASS"), bus_run=_silent_bus())
+    assert st["peers_required"] == []          # normalized at construction
+    assert st["status"] == "completed"         # no spurious capability-gap
+    assert st["gate_verdicts"]["test"]["gate"] == "vault-cross-check"
+
+
+def test_missing_peers_required_key_defaults_to_empty(tmp_path):
+    """A flow def that OMITS peers_required entirely also normalizes to [] and
+    behaves like the empty case (no gap)."""
+    fd = {"flow_id": "missing-peers",
+          "phases": [{"name": "test", "gate": "produces:test-report",
+                      "hitl": "discrete:review"}],
+          "verifier_spec_ref": None}  # note: no peers_required key at all
+    with patch.object(flow, "resolve", return_value=["wicked-vault"]):
+        from loom import gate
+        with patch.object(gate, "resolve", return_value=["wicked-vault"]):
+            st = flow.run_flow(fd, state_dir=tmp_path,
+                               vault_run=_vault("PASS"), bus_run=_silent_bus())
+    assert st["peers_required"] == []
+    assert st["status"] == "completed"
+
+
+def test_string_peers_required_is_not_iterated_char_by_char(tmp_path):
+    """A malformed ``"peers_required": "vault"`` (a bare string, not a list)
+    must NOT be walked character-by-character into per-char 'unknown' gaps.
+    The shape guard collapses any non-list to "no required peers", so the gate
+    re-derives normally instead of fabricating bogus gaps for 'v','a','u'..."""
+    fd = _gated_flow("string-peers", "vault")  # malformed: a str, not a list
+    with patch.object(flow, "resolve", return_value=["wicked-vault"]):
+        from loom import gate
+        with patch.object(gate, "resolve", return_value=["wicked-vault"]):
+            st = flow.run_flow(fd, state_dir=tmp_path,
+                               vault_run=_vault("PASS"), bus_run=_silent_bus())
+    assert st["peers_required"] == []          # NOT ['v','a','u','l','t']
+    assert st["status"] == "completed"
+    assert st["gate_verdicts"]["test"]["gate"] == "vault-cross-check"
+
+
+def test_advance_tolerates_malformed_peers_required_in_state_file(tmp_path):
+    """The read boundary is guarded too: a hand-edited state file whose
+    ``peers_required`` is a non-list (here a string) must not crash _advance
+    nor be iterated char-by-char. We persist a normal flow, then corrupt the
+    field on disk and resume; the run completes without a spurious gap."""
+    from loom import flowstate
+    fd = _gated_flow("corrupt-state", ["vault"])
+    with patch.object(flow, "resolve", return_value=["wicked-vault"]):
+        from loom import gate
+        with patch.object(gate, "resolve", return_value=["wicked-vault"]):
+            flow.run_flow(fd, state_dir=tmp_path,
+                          vault_run=_vault("PASS"), bus_run=_silent_bus())
+            # Corrupt the persisted state: peers_required -> a bare string.
+            st = flowstate.load_state("corrupt-state", state_dir=tmp_path)
+            st["peers_required"] = "vault"          # malformed on disk
+            st["current_phase"] = 1                 # rewind to the gated phase
+            st["status"] = flowstate.STATUS_RUNNING
+            st["gate_verdicts"] = {}
+            flowstate.save_state(st, state_dir=tmp_path)
+            resumed = flow.resume("corrupt-state", state_dir=tmp_path,
+                                  vault_run=_vault("PASS"), bus_run=_silent_bus())
+    # _advance normalized the malformed field at the read boundary: no char-by-
+    # char gap, the gate re-derived, the flow completed.
+    assert resumed["status"] == "completed"
+    assert resumed["gate_verdicts"]["test"]["gate"] == "vault-cross-check"
+
+
+def test_normalize_peers_required_unit():
+    """Direct unit coverage of the shared normalizer: null/missing/non-list ->
+    []; a list keeps only its string entries (drops malformed non-string items)."""
+    from loom import flowstate
+    assert flowstate.normalize_peers_required(None) == []
+    assert flowstate.normalize_peers_required("vault") == []
+    assert flowstate.normalize_peers_required(42) == []
+    assert flowstate.normalize_peers_required({"vault": 1}) == []
+    assert flowstate.normalize_peers_required(["vault", "brain"]) == ["vault", "brain"]
+    # Malformed mixed list: non-string entries are dropped, strings kept.
+    assert flowstate.normalize_peers_required(["vault", None, 7, "brain"]) == ["vault", "brain"]
+    assert flowstate.normalize_peers_required([]) == []

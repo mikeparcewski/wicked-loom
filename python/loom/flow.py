@@ -103,7 +103,11 @@ def _advance(state: dict, *, state_dir: Path,
     flow_id = state["flow_id"]
     verifier_spec = state.get("verifier_spec_ref")
 
-    peers_required = state.get("peers_required", [])
+    # Guard the field's shape at the read boundary too: a hand-edited state
+    # file may carry peers_required as null or a non-list. normalize_* treats
+    # null/missing as "no required peers" and refuses to iterate a string
+    # (avoids a TypeError / char-by-char walk in _capability_gaps).
+    peers_required = flowstate.normalize_peers_required(state.get("peers_required"))
 
     while state["current_phase"] < len(phases):
         phase = phases[state["current_phase"]]

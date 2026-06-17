@@ -39,6 +39,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_peers_required(peers_required) -> list:
+    """Coerce a flow/state ``peers_required`` field to a clean list of peer names.
+
+    A flow def (or a hand-edited state file) may carry ``peers_required`` as
+    ``null``/missing, or — malformed — as a non-list (e.g. a bare string).
+    ``list(None)`` would raise and ``list("vault")`` would silently explode a
+    string into characters, so we never feed this field to ``list()`` directly.
+    Treat null/missing/any non-list as "no required peers", and keep only the
+    string entries of a list (the peer names downstream code expects). This
+    keeps state construction and the capability check fail-closed-by-evidence
+    rather than crashing or misbehaving on shape (R4: guard, don't swallow).
+    """
+    if not isinstance(peers_required, list):
+        return []
+    return [p for p in peers_required if isinstance(p, str)]
+
+
 def _validate_flow_id(flow_id: str) -> str:
     if not isinstance(flow_id, str) or not _FLOW_ID_RE.match(flow_id):
         raise ValueError(f"unsafe flow_id: {flow_id!r} (kebab/snake/alnum, max 64)")
@@ -56,7 +73,7 @@ def new_state(flow_def: dict, *, state_dir: Path) -> dict:
     return {
         "flow_id": flow_id,
         "phases": list(flow_def.get("phases", [])),
-        "peers_required": list(flow_def.get("peers_required", [])),
+        "peers_required": normalize_peers_required(flow_def.get("peers_required")),
         "verifier_spec_ref": flow_def.get("verifier_spec_ref"),
         "current_phase": 0,
         "gate_verdicts": {},
