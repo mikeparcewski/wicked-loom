@@ -119,3 +119,145 @@ def test_flow_is_archetype_agnostic(tmp_path):
         st = flow.run_flow(fd, state_dir=tmp_path,
                            vault_run=_vault(), bus_run=_silent_bus())
     assert st["status"] == "completed"
+
+
+# --- never-fake: peers_required is now READ; a non-wired/unresolvable peer
+#     before a gated phase blocks fail-closed with a capability-gap -----------
+
+
+def _gated_flow(flow_id, peers_required):
+    """A flow whose FIRST phase is gateless and SECOND is gated — so the
+    capability check (which guards gated phases) is what stops the walk."""
+    return {
+        "flow_id": flow_id,
+        "phases": [
+            {"name": "plan", "gate": None, "hitl": "none"},
+            {"name": "test", "gate": "produces:test-report", "hitl": "discrete:review"},
+        ],
+        "peers_required": peers_required,
+        "verifier_spec_ref": None,
+    }
+
+
+def _boom_vault():
+    """A vault runner that MUST NOT be called: if the capability-gap fires
+    before the gate, the gate is never re-derived, so this never runs."""
+    def run(cmd, timeout=None):
+        raise AssertionError("gate was re-derived despite a capability-gap")
+    return run
+
+
+def test_unwired_required_peer_emits_capability_gap_and_blocks(tmp_path):
+    """A flow requiring a PLANNED peer blocks fail-closed BEFORE the gate: the
+    runner emits capability-gap, records the verdict, never advances the gated
+    phase, and never re-derives (the vault runner is never invoked). I2-style
+    fail-closed — loom blocks, it never fakes a pass."""
+    from loom import manifest
+    planned = manifest.Peer(name="planned-peer", npm_package="wicked-planned",
+                            env_var="WICKED_PLANNED_BIN", version_pin="1.0",
+                            install_cmd=["npx", "wicked-planned"],
+                            probe_cmd=["wicked-planned", "--version"],
+                            status=manifest.STATUS_PLANNED)
+    fd = _gated_flow("gap-planned", ["planned-peer"])
+    events = []
+
+    def recording_bus(cmd, timeout=None):
+        events.append(cmd)
+        return RunResult(returncode=0, stdout="", stderr="")
+
+    with patch.dict(manifest.PEERS, {"planned-peer": planned}):
+        with patch.object(flow, "resolve", return_value=["wicked-planned"]):
+            st = flow.run_flow(fd, state_dir=tmp_path,
+                               vault_run=_boom_vault(), bus_run=recording_bus)
+
+    # Blocked at the gated phase ("test", idx 1) — NOT advanced, NOT parked.
+    assert st["status"] == "running"
+    assert st["parked"] is False
+    assert st["current_phase"] == 1
+    verdict = st["gate_verdicts"]["test"]
+    assert verdict["satisfied"] is False
+    assert verdict["gate"] == "capability-gap"
+    assert verdict["overall"] == "CAPABILITY_GAP"
+    assert verdict["re_derived"] is False
+    # The gap names the offending peer and why.
+    gap = verdict["gaps"][0]
+    assert gap["peer"] == "planned-peer"
+    assert gap["reason"] == "unwired"
+    assert gap["capability"] == "planned"
+    # A capability-gap event was announced on the bus (best-effort).
+    assert any("loom:flow:capability-gap" in c for c in events)
+
+
+def test_unknown_required_peer_is_a_capability_gap(tmp_path):
+    """A flow requiring a peer that is not in the manifest at all -> gap with
+    reason 'unknown'; fail-closed, no advance."""
+    fd = _gated_flow("gap-unknown", ["does-not-exist"])
+    with patch.object(flow, "resolve", return_value=None):
+        st = flow.run_flow(fd, state_dir=tmp_path,
+                           vault_run=_boom_vault(), bus_run=_silent_bus())
+    assert st["status"] == "running"
+    assert st["current_phase"] == 1
+    gap = st["gate_verdicts"]["test"]["gaps"][0]
+    assert gap["peer"] == "does-not-exist"
+    assert gap["reason"] == "unknown"
+
+
+def test_wired_but_unresolvable_required_peer_is_a_capability_gap(tmp_path):
+    """A WIRED peer that does not resolve (kill-switch / not installed) is still
+    a gap — diagnosable as 'unresolvable' with the install hint, instead of an
+    opaque 'gate unavailable'."""
+    fd = _gated_flow("gap-unresolvable", ["vault"])
+    # vault IS wired (manifest default) but resolve() returns None here.
+    with patch.object(flow, "resolve", return_value=None):
+        st = flow.run_flow(fd, state_dir=tmp_path,
+                           vault_run=_boom_vault(), bus_run=_silent_bus())
+    assert st["status"] == "running"
+    assert st["current_phase"] == 1
+    gap = st["gate_verdicts"]["test"]["gaps"][0]
+    assert gap["peer"] == "vault"
+    assert gap["reason"] == "unresolvable"
+    assert gap["install_cmd"] == ["npx", "wicked-vault-install"]
+
+
+def test_capability_gap_is_persisted_and_visible_via_status(tmp_path):
+    """The gap verdict is persisted exactly like a gate verdict — status()
+    surfaces it without advancing."""
+    fd = _gated_flow("gap-persist", ["does-not-exist"])
+    with patch.object(flow, "resolve", return_value=None):
+        flow.run_flow(fd, state_dir=tmp_path,
+                      vault_run=_boom_vault(), bus_run=_silent_bus())
+    st = flow.status("gap-persist", state_dir=tmp_path)
+    assert st["gate_verdicts"]["test"]["gate"] == "capability-gap"
+    assert st["status"] == "running"
+
+
+def test_wired_resolvable_required_peer_does_not_gap(tmp_path):
+    """Control: when every required peer is wired AND resolvable, there is NO
+    gap — the gate re-derives normally and the flow advances. Proves the check
+    is precise (it does not block a correctly-provisioned flow)."""
+    fd = _gated_flow("no-gap", ["vault"])  # vault is wired by default
+    # resolve() returns a command (peer resolvable) for both the capability
+    # check (flow.resolve) AND the gate (gate.resolve).
+    with patch.object(flow, "resolve", return_value=["wicked-vault"]):
+        from loom import gate
+        with patch.object(gate, "resolve", return_value=["wicked-vault"]):
+            st = flow.run_flow(fd, state_dir=tmp_path,
+                               vault_run=_vault("PASS"), bus_run=_silent_bus())
+    # No gap -> the gate re-derived (stub PASS) -> the flow COMPLETED past the
+    # gated phase (no hard gate in this flow def).
+    assert st["status"] == "completed"
+    assert st["gate_verdicts"]["test"]["satisfied"] is True
+    assert st["gate_verdicts"]["test"]["gate"] == "vault-cross-check"
+
+
+def test_empty_peers_required_never_gaps(tmp_path):
+    """A flow with no peers_required behaves exactly as before this change —
+    activating the field must not regress the empty case."""
+    fd = _gated_flow("empty-req", [])
+    with patch.object(flow, "resolve", return_value=["wicked-vault"]):
+        from loom import gate
+        with patch.object(gate, "resolve", return_value=["wicked-vault"]):
+            st = flow.run_flow(fd, state_dir=tmp_path,
+                               vault_run=_vault("PASS"), bus_run=_silent_bus())
+    assert st["status"] == "completed"
+    assert st["gate_verdicts"]["test"]["gate"] == "vault-cross-check"

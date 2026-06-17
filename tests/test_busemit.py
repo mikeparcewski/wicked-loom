@@ -9,8 +9,25 @@ def test_event_names_are_the_spec_set():
     assert busemit.EVENTS["phase-advanced"] == "loom:flow:phase-advanced"
     assert busemit.EVENTS["gate-passed"] == "loom:flow:gate-passed"
     assert busemit.EVENTS["gate-failed"] == "loom:flow:gate-failed"
+    assert busemit.EVENTS["capability-gap"] == "loom:flow:capability-gap"
     assert busemit.EVENTS["needs-human"] == "loom:flow:needs-human"
     assert busemit.EVENTS["completed"] == "loom:flow:completed"
+
+
+def test_capability_gap_event_is_emittable():
+    """The never-fake announcement is a real, fire-and-forget event like the
+    rest — emits via the bus, reports True on accept."""
+    seen = {}
+
+    def run(cmd, timeout=None):
+        seen["cmd"] = cmd
+        return RunResult(returncode=0, stdout="", stderr="")
+
+    with patch.object(busemit, "resolve", return_value=["wicked-bus"]):
+        ok = busemit.emit("capability-gap",
+                          {"flow_id": "f1", "phase": "test", "gaps": []}, run=run)
+    assert ok is True
+    assert "loom:flow:capability-gap" in seen["cmd"]
 
 
 def test_emit_invokes_bus_with_event_and_payload():

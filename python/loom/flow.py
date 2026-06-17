@@ -14,6 +14,17 @@ Invariants (spec §5):
   I6 — archetype-agnostic: this module branches ONLY on the flow definition's
        ``gate`` / ``hitl`` fields, never on archetype names.
 
+The never-fake contract (capability-gap): before re-deriving a gated phase, the
+runner checks the flow's ``peers_required`` against the manifest's declared
+capability ``status``. If a required peer is unknown, unresolvable, or not
+``wired`` (planned/experimental), the runner blocks FAIL-CLOSED with a precise
+``capability-gap`` — naming exactly which peer must be installed/wired — instead
+of letting the gate fail opaquely as a generic "unavailable". This activates the
+previously-inert ``peers_required`` field (captured into state by flowstate but
+never read here before) and makes loom's fail-closed posture diagnosable. It is
+strictly additive to the gate: it can only BLOCK, never satisfy (consistent with
+I2 — loom never invents a pass).
+
 The vault runner and bus runner are injected (``vault_run`` / ``bus_run``) so a
 flow test never spawns a real vault or bus.
 """
@@ -23,7 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from loom import busemit, flowstate
+from loom import busemit, flowstate, manifest
 from loom.compose import RunResult, _default_run
 from loom.gate import run_gate
 from loom.resolve import resolve  # re-exported so tests can patch flow.resolve
@@ -36,6 +47,42 @@ _GATE_PREFIX = "produces:"
 def _is_hard(hitl: Optional[str]) -> bool:
     """A hard gate is any hitl discipline of the form ``hard:*`` (spec §3.1)."""
     return isinstance(hitl, str) and hitl.startswith("hard:")
+
+
+def _capability_gaps(peers_required: list) -> list:
+    """Return one gap descriptor per required peer the runtime must NOT depend
+    on yet. The never-fake check: a required peer is a gap when it is
+
+      * unknown   — not in the manifest at all, or
+      * unwired   — declared capability ``status`` is not ``wired``
+                    (planned/experimental), or
+      * unresolvable — no runnable command resolves (PATH/npx/env kill-switch).
+
+    Pure + deterministic (resolve() spawns nothing). Each descriptor names the
+    offending peer and WHY, plus the install command when one is known — so the
+    emitted gap tells an operator exactly what to do.
+    """
+    gaps = []
+    for name in peers_required:
+        peer = manifest.get(name)
+        if peer is None:
+            gaps.append({"peer": name, "reason": "unknown",
+                         "detail": f"required peer {name!r} is not a known peer"})
+            continue
+        if not peer.is_wired:
+            gaps.append({"peer": name, "reason": "unwired",
+                         "capability": peer.status,
+                         "install_cmd": peer.install_cmd,
+                         "detail": f"required peer {name!r} capability is "
+                                   f"{peer.status!r}, not 'wired'"})
+            continue
+        if resolve(name) is None:
+            gaps.append({"peer": name, "reason": "unresolvable",
+                         "install_cmd": peer.install_cmd,
+                         "detail": f"required peer {name!r} is wired but does not "
+                                   f"resolve (install it or set "
+                                   f"{peer.env_var})"})
+    return gaps
 
 
 def _produces_of(gate_spec: str) -> str:
@@ -56,6 +103,8 @@ def _advance(state: dict, *, state_dir: Path,
     flow_id = state["flow_id"]
     verifier_spec = state.get("verifier_spec_ref")
 
+    peers_required = state.get("peers_required", [])
+
     while state["current_phase"] < len(phases):
         phase = phases[state["current_phase"]]
         name = phase.get("name", str(state["current_phase"]))
@@ -67,6 +116,28 @@ def _advance(state: dict, *, state_dir: Path,
                          {"flow_id": flow_id, "phase": name}, run=bus_run)
             state["current_phase"] += 1
             continue
+
+        # Never-fake: a gated phase depends on its required peers. If any is
+        # unknown/unwired/unresolvable, BLOCK fail-closed with a precise gap
+        # BEFORE re-deriving — so the failure reads "peer X not wired", not a
+        # generic "gate unavailable". This only blocks; it never satisfies (I2).
+        gaps = _capability_gaps(peers_required)
+        if gaps:
+            verdict = {
+                "satisfied": False,
+                "gate": "capability-gap",
+                "overall": "CAPABILITY_GAP",
+                "re_derived": False,
+                "gaps": gaps,
+                "detail": "required peer(s) not wired/resolvable; flow blocks "
+                          "fail-closed without re-deriving (never-fake).",
+            }
+            state["gate_verdicts"][name] = verdict
+            busemit.emit("capability-gap",
+                         {"flow_id": flow_id, "phase": name, "gaps": gaps},
+                         run=bus_run)
+            flowstate.save_state(state, state_dir=state_dir)
+            return state  # blocked on capability; status stays "running" (I2)
 
         verdict = run_gate(_produces_of(gate_spec), scope=flow_id,
                            with_attestations=_is_hard(hitl),

@@ -23,6 +23,15 @@ Status semantics (no cry-wolf — see R4 "never raise, surface as data"):
   error    — reserved for genuine faults: unknown peer, or the probe attempt
              RAISED (binary vanished, OS error). A responding-but-unparseable
              peer is NEVER "error".
+
+``status`` above is runtime REACHABILITY (can we run it / does its version meet
+the pin). Every row ALSO carries the peer's declared CAPABILITY readiness under
+a separate ``capability`` key (``wired``/``planned``/``experimental`` from
+manifest.Peer.status) plus ``capability_ok``. The two are deliberately distinct:
+a peer can be perfectly reachable (status ``ok``) yet not wired as a capability
+(``capability`` ``planned``) — doctor must answer "reachable but not wired yet"
+distinctly from "missing/drift". Overloading the reachability ``status`` key
+would break doctor's exit logic, so the capability lives on its own key.
 """
 
 from __future__ import annotations
@@ -87,8 +96,33 @@ def _probe_command(version_cmd: list[str], peer: Peer) -> list[str]:
     return version_cmd + peer.probe_cmd[1:]
 
 
+def _stamp_capability(row: dict, peer: "Peer | None") -> dict:
+    """Add the peer's declared capability readiness to a reachability row.
+
+    ``capability`` is the manifest's honest status (wired/planned/experimental)
+    — orthogonal to the row's ``status`` (reachability). ``capability_ok`` mirrors
+    the never-fake predicate (``True`` only for ``wired``). For an unknown peer
+    (no manifest entry) there is no declared capability, so both are None/False.
+    Doctor surfaces these so "reachable but not wired" reads distinctly from
+    "missing/drift". This NEVER changes the reachability ``status`` or ``ok`` keys
+    — the capability is purely additive (no cry-wolf, no exit-logic change).
+    """
+    if peer is None:
+        row["capability"] = None
+        row["capability_ok"] = False
+    else:
+        row["capability"] = peer.status
+        row["capability_ok"] = peer.is_wired
+    return row
+
+
 def check_peer(name: str, run: Runner = _default_run) -> dict:
     peer = manifest.get(name)
+    return _stamp_capability(_check_peer_reachability(name, peer, run=run), peer)
+
+
+def _check_peer_reachability(name: str, peer: "Peer | None",
+                             run: Runner = _default_run) -> dict:
     if peer is None:
         return {"peer": name, "status": "error", "ok": False, "detail": "unknown peer"}
 

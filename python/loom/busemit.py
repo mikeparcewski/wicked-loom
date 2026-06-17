@@ -11,7 +11,13 @@ DEFERRED (spec D3 / §9 D-headless). This file is the producer side only.
 
 Stable event names (spec §4.3 #3):
   loom:flow:started | phase-advanced | gate-passed | gate-failed
-                    | needs-human | completed
+                    | capability-gap | needs-human | completed
+
+``capability-gap`` is the never-fake announcement: a flow required a peer whose
+declared capability is not ``wired`` (or that is unresolvable), so the runner
+blocked fail-closed rather than proceed. Like every event here it is fire-and-
+forget — it ANNOUNCES the block, it does not cause it (the block is decided
+synchronously in flow.py; an event never gates — I4).
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ EVENTS: dict = {
     "phase-advanced": "loom:flow:phase-advanced",
     "gate-passed": "loom:flow:gate-passed",
     "gate-failed": "loom:flow:gate-failed",
+    "capability-gap": "loom:flow:capability-gap",
     "needs-human": "loom:flow:needs-human",
     "completed": "loom:flow:completed",
 }

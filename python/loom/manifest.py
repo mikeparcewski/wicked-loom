@@ -4,11 +4,37 @@ Source of truth ported from wicked-garden docs/required-peers.md + plugin.json.
 Version pins are the MAJOR.MINOR floor (the `^x.y` in plugin.json), compared by
 compose.py. Install commands are headless (npm/npx) — the `/plugin install`
 path is CC-UX sugar, not the only route.
+
+Capability honesty (the never-fake contract)
+---------------------------------------------
+Each peer carries a declared capability ``status`` — ``wired`` | ``planned`` |
+``experimental`` — distinct from runtime *reachability* (resolve + version-pin,
+which compose.py reports as ok/drift/present/missing/error). ``status`` answers
+a different question: "is this peer's capability declared ready for the runtime
+to depend on?" The contract, ported from the factory's stack-registry, is
+absolute: **the runtime NEVER pretends a non-``wired`` peer satisfies a gate.**
+When a flow requires a peer that is ``planned``/``experimental`` (or
+unresolvable), the runner emits a precise ``capability-gap`` naming exactly
+which peer must be installed/wired — it never silently proceeds and never fakes
+a pass (see flow.py). Capability is *data*, never invented.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+# The honest capability vocabulary (factory stack-registry parity).
+#   wired        — capability declared ready; the runtime may depend on it.
+#   planned      — known peer, capability not yet wired; never satisfies a gate.
+#   experimental — present but not trusted for gating; treated like planned for
+#                  the never-fake contract (a flow that requires it gets a gap).
+STATUS_WIRED = "wired"
+STATUS_PLANNED = "planned"
+STATUS_EXPERIMENTAL = "experimental"
+# The set of statuses the runtime trusts to satisfy a required-peer dependency.
+# ONLY ``wired`` is trusted — this is the fail-closed half of the never-fake
+# contract: anything else yields a capability-gap rather than a silent proceed.
+WIRED_STATUSES = frozenset({STATUS_WIRED})
 
 
 @dataclass(frozen=True)
@@ -23,13 +49,33 @@ class Peer:
     # e.g. brain installs/runs as `wicked-brain` but reports its version via
     # `wicked-brain-server`. Empty string means "same as npm_package".
     version_bin: str = ""
+    # Declared capability readiness (the never-fake contract — see module
+    # docstring). Distinct from runtime reachability. Defaults to "wired": every
+    # peer shipped today is a wired capability. A non-"wired" peer NEVER
+    # satisfies a required-peer dependency — the runner emits a capability-gap.
+    status: str = STATUS_WIRED
 
     @property
     def version_package(self) -> str:
         """The binary that answers ``probe_cmd`` — falls back to npm_package."""
         return self.version_bin or self.npm_package
 
+    @property
+    def is_wired(self) -> bool:
+        """True iff this peer's declared capability is trusted for gating.
 
+        The fail-closed predicate behind the never-fake contract: a peer that is
+        not ``wired`` (planned/experimental/anything unrecognised) is treated as
+        a capability the runtime must NOT depend on yet.
+        """
+        return self.status in WIRED_STATUSES
+
+
+# Every peer shipped today is a WIRED capability — the runtime is allowed to
+# depend on each. ``status`` is set explicitly (rather than relying on the
+# dataclass default) so the never-fake contract is visible at the data: flipping
+# a peer to ``planned``/``experimental`` here is the ONE edit that makes the
+# runner emit a capability-gap for any flow that requires it.
 PEERS: dict[str, Peer] = {
     "vault": Peer(
         name="vault",
@@ -38,6 +84,7 @@ PEERS: dict[str, Peer] = {
         version_pin="0.3",
         install_cmd=["npx", "wicked-vault-install"],
         probe_cmd=["wicked-vault", "--version"],
+        status=STATUS_WIRED,
     ),
     "testing": Peer(
         name="testing",
@@ -46,6 +93,7 @@ PEERS: dict[str, Peer] = {
         version_pin="0.3",
         install_cmd=["npx", "wicked-testing", "install"],
         probe_cmd=["wicked-testing", "--version"],
+        status=STATUS_WIRED,
     ),
     "brain": Peer(
         name="brain",
@@ -56,6 +104,7 @@ PEERS: dict[str, Peer] = {
         probe_cmd=["wicked-brain-server", "--version"],
         # Version lives in the server binary, not the `wicked-brain` package.
         version_bin="wicked-brain-server",
+        status=STATUS_WIRED,
     ),
     "bus": Peer(
         name="bus",
@@ -64,6 +113,7 @@ PEERS: dict[str, Peer] = {
         version_pin="2.0",
         install_cmd=["npm", "install", "-g", "wicked-bus@latest"],
         probe_cmd=["wicked-bus", "--version"],
+        status=STATUS_WIRED,
     ),
 }
 

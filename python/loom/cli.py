@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from loom import manifest
-from loom.compose import check_all, install_peer
+from loom.compose import RunResult, check_all, install_peer
 from loom.resolve import resolve
 from loom.gate import run_gate
 from loom.flow import run_flow, status as flow_status, resume as flow_resume
@@ -124,14 +124,61 @@ def _load_flow_def(path_str: str) -> dict:
     return json.loads(Path(path_str).read_text(encoding="utf-8"))
 
 
+def _dry_run_runners():
+    """Built-in stub runners for ``--dry-run`` (print mode).
+
+    The control-plane smoke: walk the phase machine with NO real peer SPAWNED.
+      * vault stub returns ``{"overall":"PASS"}`` — the exact shape
+        ``gate.run_gate`` parses — so gated phases re-derive to a pass and the
+        walk proceeds (parking at any hard gate, exactly like production — I5 is
+        decided in flow.py, which is untouched).
+      * bus stub is a no-op success — no event is emitted off-box.
+    These replace the SUBPROCESS execution only; peer RESOLUTION still runs
+    (resolve() spawns nothing — pure PATH/env lookup). So a dry-run reflects the
+    box's resolvability: a wired peer that does not resolve still surfaces a
+    capability-gap, and a gate whose vault is unresolvable still fails closed —
+    dry-run never weakens those invariants, it only avoids the real subprocess.
+    In a normal env (or CI with node) every peer resolves via PATH/npx, so the
+    walk runs end-to-end with nothing real executed.
+    """
+    def vault_run(cmd, timeout=None):
+        return RunResult(returncode=0, stdout=json.dumps({"overall": "PASS"}),
+                         stderr="")
+
+    def bus_run(cmd, timeout=None):
+        return RunResult(returncode=0, stdout="", stderr="")
+
+    return vault_run, bus_run
+
+
 def _cmd_flow(args: list) -> int:
     if not args:
         _emit({"error": "usage: loom flow <run|status|resume> ..."})
         return 2
     sub, rest = args[0], args[1:]
-    state_dir = Path(_opt(rest, "--state-dir") or _default_state_dir())
+    dry_run = "--dry-run" in rest
+    # In dry-run we MUST leave no trace: if the operator did not pin a
+    # --state-dir, persist to an ephemeral temp dir that is discarded on exit,
+    # so a control-plane smoke writes nothing into the project's .wicked-loom.
+    explicit_state_dir = _opt(rest, "--state-dir")
+    tmp_state = None
+    if dry_run and not explicit_state_dir:
+        import tempfile
+        tmp_state = tempfile.TemporaryDirectory(prefix="loom-dryrun-")
+        state_dir = Path(tmp_state.name)
+    else:
+        state_dir = Path(explicit_state_dir or _default_state_dir())
     # Position-aware: never confuse a positional with a --state-dir value.
+    # ``--dry-run`` is a bare flag, so _positionals already skips it.
     positional = _positionals(rest)
+
+    # In dry-run, inject stub vault/bus runners so the phase walk runs with no
+    # real peer spawned (control-plane print mode). Production passes the real
+    # defaults (run_flow/resume default to compose._default_run).
+    runner_kw = {}
+    if dry_run:
+        vault_run, bus_run = _dry_run_runners()
+        runner_kw = {"vault_run": vault_run, "bus_run": bus_run}
 
     # Every path that can raise (missing file, bad JSON, unsafe flow_id) is
     # wrapped here so the CLI boundary surfaces errors as JSON, never a raw
@@ -139,11 +186,17 @@ def _cmd_flow(args: list) -> int:
     try:
         if sub == "run":
             if not positional:
-                _emit({"error": "usage: loom flow run <flow-def.json> [--state-dir D]"})
+                _emit({"error": "usage: loom flow run <flow-def.json> "
+                                "[--state-dir D] [--dry-run]"})
                 return 2
             flow_def = _load_flow_def(positional[0])
-            st = run_flow(flow_def, state_dir=state_dir)
-            _emit({"flow": st})
+            st = run_flow(flow_def, state_dir=state_dir, **runner_kw)
+            _emit({"flow": st, "dry_run": dry_run})
+            # Dry-run is a control-plane smoke: a clean walk (completed OR a
+            # legitimate park/block) means the spine is well-formed -> exit 0.
+            # A real run still gates strictly (completed -> 0, else 2).
+            if dry_run:
+                return 0
             return 0 if st.get("status") == "completed" else 2
 
         if sub == "status":
@@ -156,10 +209,13 @@ def _cmd_flow(args: list) -> int:
 
         if sub == "resume":
             if not positional:
-                _emit({"error": "usage: loom flow resume <flow-id> [--state-dir D]"})
+                _emit({"error": "usage: loom flow resume <flow-id> "
+                                "[--state-dir D] [--dry-run]"})
                 return 2
-            st = flow_resume(positional[0], state_dir=state_dir)
-            _emit({"flow": st})
+            st = flow_resume(positional[0], state_dir=state_dir, **runner_kw)
+            _emit({"flow": st, "dry_run": dry_run})
+            if dry_run:
+                return 0 if st is not None else 1
             if st is None:
                 return 1
             return 0 if st.get("status") == "completed" else 2
@@ -176,6 +232,11 @@ def _cmd_flow(args: list) -> int:
     except OSError as e:  # noqa: BLE001 — any other fs error surfaces as data.
         _emit({"error": "flow I/O error", "detail": str(e)})
         return 2
+    finally:
+        # Discard the ephemeral dry-run state dir (if we created one) so a
+        # control-plane smoke leaves NO trace on disk.
+        if tmp_state is not None:
+            tmp_state.cleanup()
 
     _emit({"error": f"unknown flow subcommand: {sub}",
            "subcommands": ["run", "status", "resume"]})

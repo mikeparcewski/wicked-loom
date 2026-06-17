@@ -36,6 +36,12 @@ For each peer: `WICKED_<PEER>_BIN` env (empty = kill-switch) → `PATH` →
 
 vault · testing · brain · bus — pins mirror wicked-garden's `required-peers`.
 
+Each peer also carries a declared capability **`status`** — `wired` |
+`planned` | `experimental` — distinct from runtime reachability. `doctor`
+surfaces it (`capability` / `capability_ok` on each row): a peer can be reachable
+yet not wired. The never-fake contract is absolute — the runtime never pretends a
+non-`wired` peer satisfies a gate (see Conduct).
+
 ## Conduct (gate + flow)
 
 Synchronous, fail-closed evidence gating and an archetype-agnostic flow runtime.
@@ -43,6 +49,7 @@ Synchronous, fail-closed evidence gating and an archetype-agnostic flow runtime.
     npx wicked-loom gate test-report --scope build-1        # re-derive one produces via the vault
     npx wicked-loom gate verdict --scope b1 --with-attestations
     npx wicked-loom flow run ./flow-def.json                 # run a flow definition
+    npx wicked-loom flow run ./flow-def.json --dry-run       # walk the spine with stubs (no peer spawned)
     npx wicked-loom flow status build-1                      # read a flow's state
     npx wicked-loom flow resume build-1                      # continue past an approved hard gate
 
@@ -52,6 +59,19 @@ never a pass); the verifier spec is fail-**soft** (absent → generic detection,
 never blocks). The runner is archetype-agnostic — it executes any flow
 definition (`phases[]` with optional `gate`/`hitl`, `peers_required`,
 `verifier_spec_ref`) and parks at any `hard:*` gate, never self-approving.
+
+**Capability-gap (never-fake):** before a gated phase the runner checks the
+flow's `peers_required` against each peer's declared `status`. If a required
+peer is unknown, not `wired`, or unresolvable, the flow blocks **fail-closed**
+with a precise `capability-gap` naming the peer to install/wire — so "gate
+unavailable" becomes "peer X not wired" — rather than proceeding or faking a pass.
+
+**`--dry-run` (print mode):** walks the phase machine with built-in stub
+vault/bus runners so no real peer is spawned; it gates/parks exactly as
+production would (the hard-gate park is preserved) and, with no `--state-dir`,
+writes nothing to disk. A control-plane smoke for flow authors and CI — it stubs
+the *subprocess*, not resolution, so an unresolvable required peer still surfaces
+its capability-gap.
 
 The headless bus-consumer / unattended execution mode is **deferred** — this
 release emits transition events best-effort but does not react to them.
