@@ -204,3 +204,55 @@ def test_genuinely_absent_bus_is_missing_not_ok():
         r = compose.check_peer("bus", run=_runner())
     assert r["status"] == "missing"
     assert r["ok"] is False
+
+
+# --- capability is surfaced on every row, distinct from reachability --------
+
+
+def test_check_peer_row_carries_capability_distinct_from_status():
+    """Every row carries the peer's declared CAPABILITY (wired/...) on its own
+    key — orthogonal to the reachability ``status`` (ok/drift/...). A reachable,
+    pinned vault is status=ok AND capability=wired; the two keys never collide."""
+    with patch.object(compose, "resolve_version_bin", return_value=["wicked-vault"]):
+        r = compose.check_peer("vault", run=_runner(stdout="wicked-vault 0.3.2\n"))
+    assert r["status"] == "ok"                 # reachability unchanged
+    assert r["capability"] == "wired"          # declared capability, separate key
+    assert r["capability_ok"] is True
+    assert "status" in r and "capability" in r  # both present, never merged
+
+
+def test_capability_present_on_every_status_path():
+    """capability/capability_ok appear on ok, drift, missing, present, and the
+    raised-probe error path — the stamp is universal, never conditional."""
+    # ok
+    with patch.object(compose, "resolve_version_bin", return_value=["wicked-vault"]):
+        ok = compose.check_peer("vault", run=_runner(stdout="0.3.1"))
+    # drift
+    with patch.object(compose, "resolve_version_bin", return_value=["wicked-vault"]):
+        drift = compose.check_peer("vault", run=_runner(stdout="0.2.0"))
+    # missing
+    with patch.object(compose, "resolve_version_bin", return_value=None):
+        missing = compose.check_peer("vault", run=_runner())
+    # present (resolved, ran, version unknown)
+    with patch.object(compose, "resolve_version_bin", return_value=["wicked-vault"]):
+        present = compose.check_peer("vault", run=_runner(stdout="no version here"))
+    for row in (ok, drift, missing, present):
+        assert row["capability"] == "wired"
+        assert row["capability_ok"] is True
+
+
+def test_unknown_peer_row_has_null_capability():
+    """An unknown peer has no manifest entry, hence no declared capability:
+    capability is None and capability_ok False (never a spurious 'wired')."""
+    r = compose.check_peer("frobnicate")
+    assert r["status"] == "error"
+    assert r["capability"] is None
+    assert r["capability_ok"] is False
+
+
+def test_check_all_rows_all_carry_capability():
+    with patch.object(compose, "resolve_version_bin", return_value=["x"]):
+        rows = compose.check_all(run=_runner(stdout="9.9.9"))
+    for row in rows:
+        assert "capability" in row and "capability_ok" in row
+        assert row["capability"] == "wired"

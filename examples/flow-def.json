@@ -1,0 +1,10 @@
+{
+  "flow_id": "smoke-1",
+  "phases": [
+    { "name": "plan",   "gate": null,                   "hitl": "none" },
+    { "name": "test",   "gate": "produces:test-report", "hitl": "discrete:review" },
+    { "name": "review", "gate": "produces:verdict",     "hitl": "hard:final-verdict" }
+  ],
+  "peers_required": ["vault"],
+  "verifier_spec_ref": null
+}
