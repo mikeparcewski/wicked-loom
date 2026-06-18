@@ -2,7 +2,7 @@
 
 Commands:
   loom resolve <peer>              -> {"peer","command"}            exit 0/1
-  loom doctor                      -> {"peers":[check rows]}        exit 0/1
+  loom doctor [--strict]           -> {"peers":[check rows], ...}   exit 0/1
   loom compose install [--peer X]  -> {"results":[install rows]}    exit 0/1
 
 No business logic lives here — only parsing + formatting.
@@ -34,10 +34,41 @@ def _cmd_resolve(args: list[str]) -> int:
     return 0 if cmd is not None else 1
 
 
-def _cmd_doctor(_args: list[str]) -> int:
+def _cmd_doctor(args: list[str]) -> int:
+    """Report every peer's reachability AND declared capability.
+
+    Two orthogonal signals live on each row (see compose._stamp_capability):
+      * ``status``        — runtime REACHABILITY (ok/drift/present/missing/error)
+      * ``capability_ok`` — declared CAPABILITY readiness (True only for ``wired``)
+
+    Default exit keys on reachability only (``status == "ok"``) — the historical,
+    documented semantics, unchanged. But capability is no longer a latent
+    surprise: doctor ALWAYS surfaces a ``capability_ok`` roll-up in its JSON
+    (``all_reachable`` / ``all_capable`` + a list of any not-capable peers), so an
+    operator sees a reachable-but-unwired peer even without ``--strict``.
+
+    ``--strict`` makes the EXIT additionally assert ``capability_ok`` for every
+    peer: a peer that is reachable yet not ``wired`` (the exact case where a flow
+    requiring it would fail closed with a capability-gap) then makes doctor exit
+    non-zero too — so CI scanning only the exit code catches it. This is purely
+    additive: it can only turn a 0 into a 1, never the reverse, and never relaxes
+    the reachability check.
+    """
+    strict = "--strict" in args
     rows = check_all()
-    _emit({"peers": rows})
-    return 0 if all(r.get("status") == "ok" for r in rows) else 1
+    all_reachable = all(r.get("status") == "ok" for r in rows)
+    not_capable = [r.get("peer") for r in rows if not r.get("capability_ok")]
+    all_capable = not not_capable
+    _emit({
+        "peers": rows,
+        "all_reachable": all_reachable,
+        "all_capable": all_capable,
+        "not_capable": not_capable,
+        "strict": strict,
+    })
+    # Default: reachability only (unchanged exit semantics). --strict: AND capability.
+    ok = all_reachable and (all_capable if strict else True)
+    return 0 if ok else 1
 
 
 def _cmd_compose(args: list[str]) -> int:

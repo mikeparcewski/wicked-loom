@@ -22,7 +22,8 @@ there is no separate install step. It launches a bundled Python core, so
 ## Use
 
 ```bash
-npx wicked-loom doctor                      # check every peer
+npx wicked-loom doctor                      # check every peer (exit keys on reachability)
+npx wicked-loom doctor --strict             # also fail the exit on a reachable-but-unwired peer
 npx wicked-loom resolve vault               # print vault's runnable command
 npx wicked-loom compose install --peer bus  # install one peer
 ```
@@ -38,9 +39,12 @@ vault · testing · brain · bus — pins mirror wicked-garden's `required-peers
 
 Each peer also carries a declared capability **`status`** — `wired` |
 `planned` | `experimental` — distinct from runtime reachability. `doctor`
-surfaces it (`capability` / `capability_ok` on each row): a peer can be reachable
-yet not wired. The never-fake contract is absolute — the runtime never pretends a
-non-`wired` peer satisfies a gate (see Conduct).
+surfaces it (`capability` / `capability_ok` on each row, plus an `all_capable` /
+`not_capable` roll-up): a peer can be reachable yet not wired. `doctor`'s default
+exit keys on reachability only (unchanged); `doctor --strict` additionally fails
+the exit when any peer is reachable but not `wired` — the exact case a flow
+requiring it would fail closed on. The never-fake contract is absolute — the
+runtime never pretends a non-`wired` peer satisfies a gate (see Conduct).
 
 ## Conduct (gate + flow)
 
