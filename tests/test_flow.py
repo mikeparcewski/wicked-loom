@@ -231,6 +231,91 @@ def test_capability_gap_is_persisted_and_visible_via_status(tmp_path):
     assert st["status"] == "running"
 
 
+# --- LOW-2: a capability-gap on re-run must NOT clobber a prior REAL verdict ---
+
+
+def test_capability_gap_preserves_prior_real_verdict_on_rerun(tmp_path):
+    """Re-run after a peer is un-wired: a phase that previously recorded a REAL
+    (re-derived) PASS, then gaps because its required peer is no longer wired,
+    must PRESERVE the prior real verdict under ``prior_verdict`` rather than
+    destroy it. The gap still becomes the active verdict (fail-closed, I2)."""
+    from loom import flowstate, manifest
+    fd = _gated_flow("regap", ["regap-peer"])
+
+    # Phase 1: the peer is WIRED + resolvable -> the gate re-derives a real PASS.
+    wired = manifest.Peer(name="regap-peer", npm_package="wicked-regap",
+                          env_var="WICKED_REGAP_BIN", version_pin="1.0",
+                          install_cmd=["npx", "wicked-regap"],
+                          probe_cmd=["wicked-regap", "--version"],
+                          status=manifest.STATUS_WIRED)
+    with patch.dict(manifest.PEERS, {"regap-peer": wired}):
+        with patch.object(flow, "resolve", return_value=["wicked-regap"]):
+            from loom import gate
+            with patch.object(gate, "resolve", return_value=["wicked-regap"]):
+                st = flow.run_flow(fd, state_dir=tmp_path,
+                                   vault_run=_vault("PASS"), bus_run=_silent_bus())
+    real = st["gate_verdicts"]["test"]
+    assert real["satisfied"] is True
+    assert real["gate"] == "vault-cross-check"
+    assert real["re_derived"] is True
+
+    # Operator re-runs the SAME phase, but the peer has since been un-wired
+    # (flipped to planned). Rewind to the gated phase and resume.
+    rewound = flowstate.load_state("regap", state_dir=tmp_path)
+    rewound["current_phase"] = 1
+    rewound["status"] = flowstate.STATUS_RUNNING
+    flowstate.save_state(rewound, state_dir=tmp_path)
+
+    planned = manifest.Peer(name="regap-peer", npm_package="wicked-regap",
+                            env_var="WICKED_REGAP_BIN", version_pin="1.0",
+                            install_cmd=["npx", "wicked-regap"],
+                            probe_cmd=["wicked-regap", "--version"],
+                            status=manifest.STATUS_PLANNED)
+    with patch.dict(manifest.PEERS, {"regap-peer": planned}):
+        with patch.object(flow, "resolve", return_value=["wicked-regap"]):
+            re = flow.resume("regap", state_dir=tmp_path,
+                             vault_run=_boom_vault(), bus_run=_silent_bus())
+
+    gap = re["gate_verdicts"]["test"]
+    # The gap is now the ACTIVE verdict and blocks fail-closed (I2 unchanged).
+    assert gap["gate"] == "capability-gap"
+    assert gap["satisfied"] is False
+    assert re["status"] == "running"
+    assert re["current_phase"] == 1
+    # The prior REAL verdict is PRESERVED, not clobbered.
+    assert "prior_verdict" in gap
+    assert gap["prior_verdict"]["satisfied"] is True
+    assert gap["prior_verdict"]["gate"] == "vault-cross-check"
+    assert gap["prior_verdict"]["re_derived"] is True
+
+
+def test_capability_gap_does_not_stack_prior_verdict_on_gap(tmp_path):
+    """A re-run where the PRIOR verdict was itself a gap (not a real
+    re-derivation) must NOT nest prior_verdict — only a REAL verdict is worth
+    preserving, so repeated gap re-runs stay idempotent (no gap-on-gap chain)."""
+    fd = _gated_flow("regap-idem", ["does-not-exist"])
+    with patch.object(flow, "resolve", return_value=None):
+        st = flow.run_flow(fd, state_dir=tmp_path,
+                           vault_run=_boom_vault(), bus_run=_silent_bus())
+    first = st["gate_verdicts"]["test"]
+    assert first["gate"] == "capability-gap"
+    assert "prior_verdict" not in first  # nothing real preceded it
+
+    # Rewind and re-run -> still a gap, and STILL no prior_verdict (the prior was
+    # a gap, which is not re_derived, so it is not preserved).
+    from loom import flowstate
+    rewound = flowstate.load_state("regap-idem", state_dir=tmp_path)
+    rewound["current_phase"] = 1
+    rewound["status"] = flowstate.STATUS_RUNNING
+    flowstate.save_state(rewound, state_dir=tmp_path)
+    with patch.object(flow, "resolve", return_value=None):
+        re = flow.resume("regap-idem", state_dir=tmp_path,
+                         vault_run=_boom_vault(), bus_run=_silent_bus())
+    second = re["gate_verdicts"]["test"]
+    assert second["gate"] == "capability-gap"
+    assert "prior_verdict" not in second
+
+
 def test_wired_resolvable_required_peer_does_not_gap(tmp_path):
     """Control: when every required peer is wired AND resolvable, there is NO
     gap — the gate re-derives normally and the flow advances. Proves the check

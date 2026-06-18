@@ -36,9 +36,64 @@ def test_doctor_prints_all_rows():
 
 
 def test_doctor_exits_nonzero_on_missing_peer():
-    rows = [{"peer": "vault", "status": "missing"}]
+    rows = [{"peer": "vault", "status": "missing", "capability_ok": True}]
     with patch("loom.cli.check_all", return_value=rows):
         code, _ = _run(["doctor"])
+    assert code == 1
+
+
+# --- doctor surfaces capability_ok (LOW-1): default exit keys on reachability
+#     only, but capability is rolled up in the JSON and --strict asserts it -----
+
+
+def test_doctor_default_exit_keys_on_reachability_only_not_capability():
+    """Historical semantics preserved: a peer that is REACHABLE (status ok) but
+    NOT capable (capability_ok False — e.g. flipped to planned) still exits 0 in
+    DEFAULT mode. Reachability is the only exit signal without --strict."""
+    rows = [{"peer": "brain", "status": "ok", "capability": "planned",
+             "capability_ok": False}]
+    with patch("loom.cli.check_all", return_value=rows):
+        code, out = _run(["doctor"])
+    assert code == 0                                   # reachable -> exit 0 (unchanged)
+    body = json.loads(out)
+    # Capability is NOT a latent surprise: it is rolled up in the JSON regardless.
+    assert body["all_reachable"] is True
+    assert body["all_capable"] is False
+    assert body["not_capable"] == ["brain"]
+    assert body["strict"] is False
+
+
+def test_doctor_strict_exits_nonzero_when_reachable_but_not_wired():
+    """--strict ADDITIONALLY asserts capability_ok: a reachable-but-unwired peer
+    (the exact case a flow would fail closed on) now makes doctor exit non-zero,
+    so CI scanning only the exit code catches it."""
+    rows = [{"peer": "brain", "status": "ok", "capability": "planned",
+             "capability_ok": False}]
+    with patch("loom.cli.check_all", return_value=rows):
+        code, out = _run(["doctor", "--strict"])
+    assert code == 1                                   # strict folds in capability
+    body = json.loads(out)
+    assert body["strict"] is True
+    assert body["not_capable"] == ["brain"]
+
+
+def test_doctor_strict_exits_zero_when_all_reachable_and_wired():
+    """--strict is purely additive: when every peer is BOTH reachable AND wired,
+    strict still exits 0 (it can only turn a 0 into a 1, never the reverse)."""
+    rows = [{"peer": "vault", "status": "ok", "capability": "wired",
+             "capability_ok": True}]
+    with patch("loom.cli.check_all", return_value=rows):
+        code, _ = _run(["doctor", "--strict"])
+    assert code == 0
+
+
+def test_doctor_strict_does_not_relax_reachability():
+    """--strict never RELAXES the reachability check: a missing peer that happens
+    to be 'capable' still exits non-zero (reachability AND capability both hold)."""
+    rows = [{"peer": "vault", "status": "missing", "capability": "wired",
+             "capability_ok": True}]
+    with patch("loom.cli.check_all", return_value=rows):
+        code, _ = _run(["doctor", "--strict"])
     assert code == 1
 
 

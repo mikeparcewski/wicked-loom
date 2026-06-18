@@ -23,7 +23,10 @@ of letting the gate fail opaquely as a generic "unavailable". This activates the
 previously-inert ``peers_required`` field (captured into state by flowstate but
 never read here before) and makes loom's fail-closed posture diagnosable. It is
 strictly additive to the gate: it can only BLOCK, never satisfy (consistent with
-I2 — loom never invents a pass).
+I2 — loom never invents a pass). When a gap supersedes a phase that previously
+recorded a REAL (re-derived) verdict, that prior verdict is PRESERVED under the
+gap's ``prior_verdict`` key rather than clobbered — the gap still blocks, but the
+audit trail of the earlier re-derivation is not destroyed on re-run.
 
 The vault runner and bus runner are injected (``vault_run`` / ``bus_run``) so a
 flow test never spawns a real vault or bus.
@@ -136,6 +139,18 @@ def _advance(state: dict, *, state_dir: Path,
                 "detail": "required peer(s) not wired/resolvable; flow blocks "
                           "fail-closed without re-deriving (never-fake).",
             }
+            # Don't destroy a prior REAL (re-derived) verdict for this phase. A
+            # capability-gap is a runtime-provisioning block, not a re-derivation
+            # — if a peer is un-wired AFTER the phase already passed a real gate,
+            # overwriting would erase the audit trail of that re-derivation. The
+            # gap still becomes the ACTIVE verdict (so the flow blocks fail-closed
+            # — I2 unchanged), but the prior real verdict is preserved verbatim
+            # under ``prior_verdict`` (chaining, so repeated re-runs never lose the
+            # original). A prior gap is not "real" (re_derived False) — we don't
+            # stack gap-on-gap, so a clean re-run stays idempotent.
+            prior = state["gate_verdicts"].get(name)
+            if isinstance(prior, dict) and prior.get("re_derived"):
+                verdict["prior_verdict"] = prior
             state["gate_verdicts"][name] = verdict
             busemit.emit("capability-gap",
                          {"flow_id": flow_id, "phase": name, "gaps": gaps},
